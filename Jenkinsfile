@@ -8,6 +8,8 @@ pipeline {
 
     environment {
         DOCKER = '/usr/local/bin/docker'
+        DOCKER_CONFIG = "${WORKSPACE}/.docker-config"
+
         DOCKERHUB_USERNAME = 'nitindevops01'
         IMAGE_NAME = 'nitindevops01/jenkins-docker-cicd'
         CONTAINER_NAME = 'jenkins-cicd-app'
@@ -26,25 +28,55 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
+                    set -eu
+
                     echo "Checking Docker CLI..."
                     "$DOCKER" --version
 
                     echo "Checking Docker daemon..."
                     "$DOCKER" info
+
+                    echo "Preparing isolated Jenkins Docker configuration..."
+
+                    mkdir -p "$DOCKER_CONFIG"
+
+                    printf '{"auths":{},"currentContext":"desktop-linux"}\\n' \
+                        > "$DOCKER_CONFIG/config.json"
+
+                    echo "Docker configuration prepared."
                 '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    echo "Building Docker image..."
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DH_USER',
+                        passwordVariable: 'DH_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
 
-                    "$DOCKER" build \
-                        -t "${IMAGE_NAME}:${BUILD_NUMBER}" \
-                        -t "${IMAGE_NAME}:latest" \
-                        .
-                '''
+                        echo "Logging in to Docker Hub..."
+
+                        echo "$DH_TOKEN" | "$DOCKER" login \
+                            -u "$DH_USER" \
+                            --password-stdin
+
+                        echo "Building Docker image..."
+
+                        "$DOCKER" build \
+                            -t "${IMAGE_NAME}:${BUILD_NUMBER}" \
+                            -t "${IMAGE_NAME}:latest" \
+                            .
+
+                        echo "Docker image built successfully."
+                    '''
+                }
             }
         }
 
@@ -58,8 +90,12 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
 
+                        echo "Pushing image to Docker Hub..."
+
+                        # Authenticate for this stage
                         echo "$DH_TOKEN" | "$DOCKER" login \
                             -u "$DH_USER" \
                             --password-stdin
@@ -68,6 +104,8 @@ pipeline {
                         "$DOCKER" push "${IMAGE_NAME}:latest"
 
                         "$DOCKER" logout
+
+                        echo "Image pushed successfully."
                     '''
                 }
             }
@@ -76,12 +114,14 @@ pipeline {
         stage('Deploy Locally') {
             steps {
                 sh '''
+                    set -eu
+
                     echo "Deploying application locally..."
 
                     # Remove previous demo container if present
                     "$DOCKER" rm -f "$CONTAINER_NAME" || true
 
-                    # Run new container
+                    # Run the newly built image
                     "$DOCKER" run -d \
                         --name "$CONTAINER_NAME" \
                         --restart unless-stopped \
@@ -93,6 +133,7 @@ pipeline {
                     for i in $(seq 1 15); do
                         if curl -fsS "http://localhost:${APP_PORT}/" \
                             > /dev/null; then
+
                             echo "Application is responding!"
                             break
                         fi
