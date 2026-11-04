@@ -18,6 +18,7 @@ pipeline {
 
     stages {
 
+        // 1. Checkout Source Code
         stage('Checkout') {
             steps {
                 echo 'Pulling source code from GitHub...'
@@ -25,6 +26,7 @@ pipeline {
             }
         }
 
+        // 2. Verify Docker and Prepare Configuration
         stage('Verify Tools') {
             steps {
                 sh '''
@@ -36,18 +38,23 @@ pipeline {
                     echo "Checking Docker daemon..."
                     "$DOCKER" info
 
-                    echo "Preparing isolated Jenkins Docker configuration..."
+                    echo "Preparing isolated Docker configuration..."
 
                     mkdir -p "$DOCKER_CONFIG"
+                    chmod 700 "$DOCKER_CONFIG"
 
-                    printf '{"auths":{},"currentContext":"desktop-linux"}\\n' \
+                    # No currentContext and no credential helper
+                    printf '{"auths":{}}\\n' \
                         > "$DOCKER_CONFIG/config.json"
+
+                    chmod 600 "$DOCKER_CONFIG/config.json"
 
                     echo "Docker configuration prepared."
                 '''
             }
         }
 
+        // 3. Build Docker Image
         stage('Build Docker Image') {
             steps {
                 withCredentials([
@@ -80,6 +87,7 @@ pipeline {
             }
         }
 
+        // 4. Push Image to Docker Hub
         stage('Push to Docker Hub') {
             steps {
                 withCredentials([
@@ -93,24 +101,31 @@ pipeline {
                         set -eu
                         set +x
 
-                        echo "Pushing image to Docker Hub..."
+                        echo "Logging in to Docker Hub..."
 
-                        # Authenticate for this stage
                         echo "$DH_TOKEN" | "$DOCKER" login \
                             -u "$DH_USER" \
                             --password-stdin
 
-                        "$DOCKER" push "${IMAGE_NAME}:${BUILD_NUMBER}"
-                        "$DOCKER" push "${IMAGE_NAME}:latest"
+                        echo "Pushing versioned image..."
 
-                        "$DOCKER" logout
+                        "$DOCKER" push \
+                            "${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                        echo "Pushing latest image..."
+
+                        "$DOCKER" push \
+                            "${IMAGE_NAME}:latest"
 
                         echo "Image pushed successfully."
+
+                        "$DOCKER" logout || true
                     '''
                 }
             }
         }
 
+        // 5. Deploy Locally
         stage('Deploy Locally') {
             steps {
                 sh '''
@@ -131,7 +146,9 @@ pipeline {
                     echo "Waiting for application..."
 
                     for i in $(seq 1 15); do
-                        if curl -fsS "http://localhost:${APP_PORT}/" \
+
+                        if curl -fsS \
+                            "http://localhost:${APP_PORT}/" \
                             > /dev/null; then
 
                             echo "Application is responding!"
@@ -139,8 +156,10 @@ pipeline {
                         fi
 
                         if [ "$i" -eq 15 ]; then
-                            echo "Application health check failed"
+                            echo "Application health check failed."
+
                             "$DOCKER" logs "$CONTAINER_NAME"
+
                             exit 1
                         fi
 
@@ -150,13 +169,15 @@ pipeline {
                     echo "Deployment successful!"
                     echo "Application: http://localhost:${APP_PORT}"
 
-                    "$DOCKER" ps --filter "name=${CONTAINER_NAME}"
+                    "$DOCKER" ps \
+                        --filter "name=${CONTAINER_NAME}"
                 '''
             }
         }
     }
 
     post {
+
         success {
             echo 'SUCCESS: Build, Push and Deployment completed!'
             echo 'Application URL: http://localhost:8081'
@@ -167,7 +188,20 @@ pipeline {
         }
 
         always {
-            echo 'Pipeline execution finished.'
+            script {
+                sh '''
+                    echo "Cleaning temporary Docker configuration..."
+
+                    if [ -n "${DOCKER_CONFIG:-}" ] && \
+                       [ -d "$DOCKER_CONFIG" ]; then
+                        rm -rf "$DOCKER_CONFIG"
+                    fi
+
+                    echo "Pipeline cleanup completed."
+                '''
+
+                echo 'Pipeline execution finished.'
+            }
         }
     }
 }
